@@ -1,6 +1,6 @@
 mod modules;
 
-use modules::{fs, net, pty, secrets, shell, workspace};
+use modules::{agent, fs, net, pty, secrets, shell, workspace};
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_window_state::StateFlags;
 
@@ -114,6 +114,10 @@ pub fn run() {
             workspace::wsl_list_distros,
             workspace::wsl_default_distro,
             workspace::wsl_home,
+            agent::agent_pty_open,
+            agent::agent_pty_write,
+            agent::agent_pty_close,
+            agent::agent_list_installed,
             open_settings_window,
             secrets::secrets_get,
             secrets::secrets_set,
