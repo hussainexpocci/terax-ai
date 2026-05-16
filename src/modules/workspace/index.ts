@@ -5,4 +5,8 @@ export {
   useWorkspaceEnvStore,
   type WorkspaceEnv,
   type WslDistro,
-} from "./env";
+} from './env';
+export { useWorkspaceStore } from './stores/workspaceStore';
+export type { WorkspaceConfig, PersistedWorkspace } from './stores/workspaceStore';
+export { WorkspaceTabs } from './WorkspaceTabs';
+export { WorkspaceShell } from './WorkspaceShell';
