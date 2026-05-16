@@ -1,4 +1,4 @@
-import { invoke, Channel } from '@tauri-apps/api/core';
+import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
 import type {
   AgentConfig,
@@ -7,13 +7,13 @@ import type {
   AgentMessage,
   AgentSession,
 } from '../adapters/AgentAdapter';
+import { createAgentAdapter } from '../adapters/GenericCLIAdapter';
 
 type AgentSessionState = {
   session: AgentSession | null;
   messages: AgentMessage[];
   lifecycle: AgentLifecycle;
   error: string | null;
-  rawData: string;
 };
 
 type State = {
@@ -23,6 +23,7 @@ type State = {
   refreshAgents: () => Promise<void>;
   spawnAgent: (
     workspaceId: string,
+    agentId: string,
     config: AgentConfig,
   ) => Promise<AgentSession | null>;
   sendMessage: (workspaceId: string, message: string) => Promise<void>;
@@ -30,6 +31,10 @@ type State = {
   getSession: (workspaceId: string) => AgentSessionState | undefined;
   clearSession: (workspaceId: string) => void;
 };
+
+const activeAdapters = new Map<string, {
+  stop: () => void;
+}>();
 
 export const useAgentStore = create<State>((set, get) => ({
   agents: [],
@@ -41,15 +46,31 @@ export const useAgentStore = create<State>((set, get) => ({
     try {
       const agents = await invoke<AgentInfo[]>('agent_list_installed');
       set({ agents, agentsLoading: false });
-    } catch (e) {
+    } catch {
       set({ agents: [], agentsLoading: false });
     }
   },
 
-  spawnAgent: async (workspaceId: string, config: AgentConfig) => {
+  spawnAgent: async (workspaceId: string, agentId: string, config: AgentConfig) => {
     const existing = get().sessions[workspaceId];
     if (existing?.session) {
       await get().stopAgent(workspaceId);
+    }
+
+    const adapter = createAgentAdapter(agentId);
+    if (!adapter) {
+      set({
+        sessions: {
+          ...get().sessions,
+          [workspaceId]: {
+            session: null,
+            messages: [],
+            lifecycle: 'ERROR',
+            error: `Unknown agent: ${agentId}`,
+          },
+        },
+      });
+      return null;
     }
 
     const sessionState: AgentSessionState = {
@@ -57,7 +78,6 @@ export const useAgentStore = create<State>((set, get) => ({
       messages: [],
       lifecycle: 'SPAWNING',
       error: null,
-      rawData: '',
     };
 
     set((s) => ({
@@ -65,13 +85,13 @@ export const useAgentStore = create<State>((set, get) => ({
     }));
 
     try {
-      const dataChannel = new Channel<string>();
-      const exitChannel = new Channel<number>();
+      const session = await adapter.spawn({
+        workspaceRoot: config.workspaceRoot,
+        shell: config.shell,
+        env: config.env,
+      });
 
-      let accumulatedRaw = '';
-
-      dataChannel.onmessage = (data: string) => {
-        accumulatedRaw += data;
+      const cleanup = adapter.onMessage(session, (msg: AgentMessage) => {
         set((s) => {
           const sess = s.sessions[workspaceId];
           if (!sess) return s;
@@ -80,15 +100,14 @@ export const useAgentStore = create<State>((set, get) => ({
               ...s.sessions,
               [workspaceId]: {
                 ...sess,
-                rawData: accumulatedRaw,
-                lifecycle: sess.lifecycle === 'SPAWNING' ? 'READY' : sess.lifecycle,
+                messages: [...sess.messages, msg],
               },
             },
           };
         });
-      };
+      });
 
-      exitChannel.onmessage = (code: number) => {
+      adapter.onLifecycleChange(session, (lc: AgentLifecycle) => {
         set((s) => {
           const sess = s.sessions[workspaceId];
           if (!sess) return s;
@@ -97,40 +116,31 @@ export const useAgentStore = create<State>((set, get) => ({
               ...s.sessions,
               [workspaceId]: {
                 ...sess,
-                lifecycle: code === 0 ? 'STOPPED' : 'ERROR',
+                lifecycle: lc,
+                session: { ...sess.session!, lifecycle: lc },
               },
             },
           };
         });
-      };
+      });
 
-      const result = await invoke<AgentSession>('agent_pty_open', {
-        config: {
-          ...config,
-          workspace_id: workspaceId,
+      activeAdapters.set(workspaceId, {
+        stop: () => {
+          cleanup();
         },
-        cols: 120,
-        rows: 40,
-        on_data: dataChannel,
-        on_exit: exitChannel,
       });
 
-      set((s) => {
-        const sess = s.sessions[workspaceId];
-        if (!sess) return s;
-        return {
-          sessions: {
-            ...s.sessions,
-            [workspaceId]: {
-              ...sess,
-              session: result,
-              lifecycle: 'READY',
-            },
+      set((s) => ({
+        sessions: {
+          ...s.sessions,
+          [workspaceId]: {
+            ...s.sessions[workspaceId]!,
+            session,
           },
-        };
-      });
+        },
+      }));
 
-      return result;
+      return session;
     } catch (e) {
       const error = String(e);
       set((s) => ({
@@ -141,7 +151,6 @@ export const useAgentStore = create<State>((set, get) => ({
             messages: [],
             lifecycle: 'ERROR',
             error,
-            rawData: '',
           },
         },
       }));
@@ -171,11 +180,13 @@ export const useAgentStore = create<State>((set, get) => ({
       },
     }));
 
+    const adapter = createAgentAdapter(
+      get().agents.find((a) => a.installed)?.id ?? 'claude-code',
+    );
+    if (!adapter) return;
+
     try {
-      await invoke('agent_pty_write', {
-        id: sess.session.id,
-        data: message + '\n',
-      });
+      await adapter.sendMessage(sess.session, message);
     } catch (e) {
       set((s) => ({
         sessions: {
@@ -204,19 +215,16 @@ export const useAgentStore = create<State>((set, get) => ({
       },
     }));
 
+    const cleanup = activeAdapters.get(workspaceId);
+    if (cleanup) {
+      cleanup.stop();
+      activeAdapters.delete(workspaceId);
+    }
+
     try {
       await invoke('agent_pty_close', { id: sess.session.id });
-    } catch (e) {
-      set((s) => ({
-        sessions: {
-          ...s.sessions,
-          [workspaceId]: {
-            ...s.sessions[workspaceId]!,
-            lifecycle: 'ERROR',
-            error: String(e),
-          },
-        },
-      }));
+    } catch {
+      // Already closed
     }
   },
 

@@ -37,18 +37,17 @@ export function AgentPanel({
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [sessionState?.messages, sessionState?.rawData]);
+  }, [sessionState?.messages, sessionState?.lifecycle]);
 
   const handleSpawn = async () => {
     if (!selectedAgentId) return;
     const agent = agents.find((a) => a.id === selectedAgentId);
     if (!agent?.installed) return;
 
-    await spawnAgent(workspaceId, {
+    await spawnAgent(workspaceId, selectedAgentId, {
       workspaceRoot,
       shell,
       env: {},
-      customArgs: [],
     });
   };
 
@@ -116,19 +115,15 @@ export function AgentPanel({
                 className={`rounded-md px-3 py-2 text-sm ${
                   msg.role === 'user'
                     ? 'bg-primary/10 text-foreground'
-                    : 'bg-muted/50 text-muted-foreground'
+                    : msg.role === 'system'
+                      ? 'bg-destructive/10 text-destructive'
+                      : 'bg-muted/50 text-muted-foreground'
                 }`}
               >
                 <span className="font-medium">{msg.role}: </span>
                 {msg.content}
               </div>
             ))}
-
-            {sessionState.rawData && (
-              <div className="rounded-md bg-muted/30 px-3 py-2 font-mono text-xs text-muted-foreground whitespace-pre-wrap">
-                {sessionState.rawData.slice(-5000)}
-              </div>
-            )}
 
             {sessionState.error && (
               <div className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
